@@ -1,5 +1,10 @@
-group: "idm-default"
+group: "idm-lerobot"
 seed: 0
+
+dataset:
+  repo_id: "HuggingFaceVLA/libero"
+  image_key: "observation.images.image"
+  target_img_size: 64
 
 idm:
   total_updates: 10000
@@ -16,15 +21,12 @@ idm:
   encoder_deep: False
   encoder_dropout: 0.0
   frame_stack: 3
-  # TODO: change to your data path, eval is optional
-  data_path: "data/example-dataset.hdf5"
-  eval_data_path: "data/example-dataset.hdf5"
 
 bc:
   num_epochs: 10
   batch_size: 512
   learning_rate: 0.0001
-  weight_decay: 0.0 
+  weight_decay: 0.0
   warmup_epochs: 0
   encoder_scale: 32
   encoder_num_res_blocks: 2
@@ -32,9 +34,3 @@ bc:
   dropout: 0.0
   use_aug: False
   frame_stack: 3
-  # TODO: change to your data and DAVIS path
-  data_path: "data/example-dataset.hdf5"
-  dcs_backgrounds_path: "DAVIS/JPEGImages/480p"
-  dcs_backgrounds_split: "train"
-  eval_episodes: 25
-  eval_seed: 0

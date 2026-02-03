@@ -1,5 +1,10 @@
-group: "laom-labels-default"
+group: "laom-labels-lerobot"
 seed: 0
+
+dataset:
+  repo_id: "HuggingFaceVLA/libero"
+  image_key: "observation.images.image"
+  target_img_size: 64
 
 lapo:
   num_epochs: 10
@@ -25,16 +30,12 @@ lapo:
   target_tau: 0.001
   target_update_every: 1
   frame_stack: 3
-  # TODO: change to your data and action-labeled data path, eval is optional
-  data_path: "data/example-data.hdf5"
-  labeled_data_path: "data/example-data.hdf5"
-  eval_data_path: "data/example-data.hdf5"
 
 bc:
   num_epochs: 10
   batch_size: 512
   learning_rate: 0.0001
-  weight_decay: 0.0 
+  weight_decay: 0.0
   warmup_epochs: 0
   encoder_scale: 32
   encoder_num_res_blocks: 2
@@ -42,12 +43,6 @@ bc:
   dropout: 0.0
   use_aug: False
   frame_stack: 3
-  # TODO: change to your data and DAVIS path
-  data_path: "data/example-data.hdf5"
-  dcs_backgrounds_path: "DAVIS/JPEGImages/480p"
-  dcs_backgrounds_split: "train"
-  eval_episodes: 5
-  eval_seed: 0
 
 decoder:
   total_updates: 2500
@@ -57,8 +52,3 @@ decoder:
   warmup_epochs: 0
   hidden_dim: 256
   use_aug: False
-  # TODO: change to your DAVIS path
-  dcs_backgrounds_path: "DAVIS/JPEGImages/480p"
-  dcs_backgrounds_split: "train"
-  eval_episodes: 25
-  eval_seed: 0

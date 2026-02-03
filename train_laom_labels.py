@@ -5,7 +5,6 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Optional
 
-import numpy as np
 import pyrallis
 import torch
 import torch.nn as nn
@@ -15,15 +14,13 @@ import wandb
 from pyrallis import field
 from torch.utils.data import DataLoader
 from tqdm import trange
+import tqdm
 
 from src.augmentations import Augmenter
+from src.lerobot_dataset import LeRobotLAOMDataset, LeRobotBCDataset, LeRobotIterableDataset
 from src.nn import ActionDecoder, Actor, LAOMWithLabels
 from src.scheduler import linear_annealing_with_warmup
 from src.utils import (
-    DCSInMemoryDataset,
-    DCSLAOMInMemoryDataset,
-    DCSLAOMTrueActionsDataset,
-    create_env_from_df,
     get_grad_norm,
     get_optim_groups,
     normalize_img,
@@ -39,10 +36,17 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 @dataclass
+class DatasetConfig:
+    repo_id: str = "HuggingFaceVLA/libero"
+    image_key: str = "observation.images.image"
+    target_img_size: int = 64
+
+
+@dataclass
 class LAOMConfig:
     num_epochs: int = 100
-    batch_size: int = 256
-    labeled_batch_size: int = 256
+    batch_size: int = 8
+    labeled_batch_size: int = 8
     labeled_loss_coef: float = 0.05
     cosine_loss: bool = False
     use_aug: bool = False
@@ -64,9 +68,6 @@ class LAOMConfig:
     target_tau: float = 0.01
     target_update_every: int = 1
     frame_stack: int = 3
-    data_path: str = "data/test.hdf5"
-    eval_data_path: Optional[str] = None
-    labeled_data_path: str = "data/labeled_test.hdf5"
 
 
 @dataclass
@@ -82,11 +83,6 @@ class BCConfig:
     dropout: float = 0.0
     use_aug: bool = True
     frame_stack: int = 3
-    data_path: str = "data/test.hdf5"
-    dcs_backgrounds_path: str = "DAVIS/JPEGImages/480p"
-    dcs_backgrounds_split: str = "train"
-    eval_episodes: int = 10
-    eval_seed: int = 0
 
 
 @dataclass
@@ -98,10 +94,6 @@ class DecoderConfig:
     warmup_epochs: int = 5
     hidden_dim: int = 128
     use_aug: bool = True
-    dcs_backgrounds_path: str = "DAVIS/JPEGImages/480p"
-    dcs_backgrounds_split: str = "train"
-    eval_episodes: int = 10
-    eval_seed: int = 0
 
 
 @dataclass
@@ -111,67 +103,44 @@ class Config:
     name: str = "laom-labels"
     seed: int = 0
 
+    dataset: DatasetConfig = field(default_factory=DatasetConfig)
     lapo: LAOMConfig = field(default_factory=LAOMConfig)
     bc: BCConfig = field(default_factory=BCConfig)
     decoder: DecoderConfig = field(default_factory=DecoderConfig)
 
     def __post_init__(self):
         self.name = f"{self.name}-{str(uuid.uuid4())}"
-        # coupling labeled dataset for laom pretraining and action decoder finetuning
-        self.decoder.data_path = self.lapo.labeled_data_path
 
 
-@torch.no_grad()
-def evaluate(lam, dataloader, device):
-    lam.eval()
-    total_samples, total_loss = 0, 0.0
-
-    for batch in dataloader:
-        obs, next_obs, _, actions, _, _ = [b.to(device) for b in batch]
-        obs = normalize_img(obs.permute((0, 3, 1, 2)))
-        next_obs = normalize_img(next_obs.permute((0, 3, 1, 2)))
-
-        with torch.autocast(device, dtype=torch.bfloat16):
-            _, _, pred_action, _ = lam(obs, next_obs, predict_true_act=True)
-            eval_loss = F.mse_loss(pred_action, actions, reduction="sum")
-
-        total_loss += eval_loss.item()
-        total_samples += obs.shape[0]
-
-    lam.train()
-    return total_loss / total_samples
-
-
-def train_laom(config: LAOMConfig):
-    dataset = DCSLAOMInMemoryDataset(
-        config.data_path, max_offset=config.future_obs_offset, frame_stack=config.frame_stack, device=DEVICE
+def train_laom(config: LAOMConfig, dataset_config: DatasetConfig):
+    dataset = LeRobotLAOMDataset(
+        repo_id=dataset_config.repo_id,
+        frame_stack=config.frame_stack,
+        max_offset=config.future_obs_offset,
+        image_key=dataset_config.image_key,
+        target_img_size=dataset_config.target_img_size,
+        device=DEVICE,
     )
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=True,
     )
-    labeled_dataset = DCSLAOMTrueActionsDataset(
-        config.labeled_data_path,
-        max_offset=config.future_obs_offset,
+
+    # For labeled data, use the same dataset with iterable wrapper
+    labeled_dataset = LeRobotIterableDataset(
+        repo_id=dataset_config.repo_id,
         frame_stack=config.frame_stack,
+        max_offset=config.future_obs_offset,
+        image_key=dataset_config.image_key,
+        target_img_size=dataset_config.target_img_size,
         device=DEVICE,
     )
     labeled_dataloader = DataLoader(labeled_dataset, batch_size=config.labeled_batch_size)
 
-    if config.eval_data_path is not None:
-        eval_dataset = DCSLAOMInMemoryDataset(
-            config.eval_data_path, max_offset=1, frame_stack=config.frame_stack, device=DEVICE
-        )
-        eval_dataloader = DataLoader(
-            eval_dataset,
-            batch_size=config.batch_size,
-            shuffle=False,
-            drop_last=False,
-        )
-
+    img_size = dataset_config.target_img_size
     lapo = LAOMWithLabels(
-        shape=(3 * config.frame_stack, dataset.img_hw, dataset.img_hw),
+        shape=(3 * config.frame_stack, img_size, img_size),
         true_act_dim=dataset.act_dim,
         latent_act_dim=config.latent_action_dim,
         act_head_dim=config.act_head_dim,
@@ -192,8 +161,8 @@ def train_laom(config: LAOMConfig):
     torchinfo.summary(
         lapo,
         input_size=[
-            (1, 3 * config.frame_stack, dataset.img_hw, dataset.img_hw),
-            (1, 3 * config.frame_stack, dataset.img_hw, dataset.img_hw),
+            (1, 3 * config.frame_stack, img_size, img_size),
+            (1, 3 * config.frame_stack, img_size, img_size),
         ],
     )
     optim = torch.optim.Adam(
@@ -201,9 +170,11 @@ def train_laom(config: LAOMConfig):
         lr=config.learning_rate,
         fused=True,
     )
-    augmenter = Augmenter(dataset.img_hw)
+    augmenter = Augmenter(img_size)
 
-    state_probe = nn.Linear(math.prod(lapo.final_encoder_shape), dataset.state_dim).to(DEVICE)
+    # State probe uses zeros since LeRobot may not have proprioceptive state
+    state_dim = max(1, dataset.state_dim)
+    state_probe = nn.Linear(math.prod(lapo.final_encoder_shape), state_dim).to(DEVICE)
     state_probe_optim = torch.optim.Adam(state_probe.parameters(), lr=config.learning_rate)
 
     act_linear_probe = nn.Linear(config.latent_action_dim, dataset.act_dim).to(DEVICE)
@@ -223,9 +194,9 @@ def train_laom(config: LAOMConfig):
     total_tokens = 0
 
     labeled_dataloader_iter = iter(labeled_dataloader)
-    for epoch in trange(config.num_epochs, desc="Epochs"):
+    for epoch in range(config.num_epochs):
         lapo.train()
-        for i, batch in enumerate(dataloader):
+        for i, batch in tqdm.tqdm(enumerate(dataloader), desc=f"Epoch #{epoch}", total=len(dataset)):
             total_tokens += config.batch_size
             total_iterations += 1
 
@@ -243,7 +214,6 @@ def train_laom(config: LAOMConfig):
             # update lapo
             with torch.autocast(DEVICE, dtype=torch.bfloat16):
                 if config.use_aug:
-                    # using augmenter directly will not work due to bf16
                     latent_next_obs, latent_action, obs_hidden = lapo(obs_aug, future_obs_aug)
                 else:
                     latent_next_obs, latent_action, obs_hidden = lapo(obs, future_obs)
@@ -274,7 +244,6 @@ def train_laom(config: LAOMConfig):
             # update lapo
             with torch.autocast(DEVICE, dtype=torch.bfloat16):
                 if config.use_aug:
-                    # using augmenter directly will not work due to bf16
                     _, _, pred_action, _ = lapo(label_obs_aug, label_future_obs_aug, predict_true_act=True)
                 else:
                     _, _, pred_action, _ = lapo(label_obs, label_future_obs, predict_true_act=True)
@@ -336,68 +305,32 @@ def train_laom(config: LAOMConfig):
                 }
             )
 
-        if config.eval_data_path is not None:
-            eval_mse_loss = evaluate(lapo, eval_dataloader, device=DEVICE)
-            wandb.log(
-                {
-                    "lapo/eval_true_action_mse_loss": eval_mse_loss,
-                    "lapo/epoch": epoch,
-                    "lapo/total_steps": total_iterations,
-                }
-            )
-
     return lapo
 
 
-@torch.no_grad()
-def evaluate_bc(env, actor, num_episodes, seed=0, device="cpu", action_decoder=None):
-    returns = []
-    for ep in trange(num_episodes, desc="Evaluating", leave=False):
-        total_reward = 0.0
-        obs, info = env.reset(seed=seed + ep)
-        done = False
-        while not done:
-            obs_ = torch.tensor(obs.copy(), device=device)[None].permute(0, 3, 1, 2)
-            obs_ = normalize_img(obs_)
-            action, obs_emb = actor(obs_)
-            if action_decoder is not None:
-                if isinstance(action_decoder, ActionDecoder):
-                    action = action_decoder(obs_emb, action)
-                else:
-                    action = action_decoder(action)
-
-            obs, reward, terminated, truncated, info = env.step(action.squeeze().cpu().numpy())
-            done = terminated or truncated
-            total_reward += reward
-        returns.append(total_reward)
-
-    return np.array(returns)
-
-
-def train_bc(lam: LAOMWithLabels, config: BCConfig):
-    dataset = DCSInMemoryDataset(config.data_path, frame_stack=config.frame_stack, device=DEVICE)
+def train_bc(lam: LAOMWithLabels, config: BCConfig, dataset_config: DatasetConfig):
+    dataset = LeRobotBCDataset(
+        repo_id=dataset_config.repo_id,
+        frame_stack=config.frame_stack,
+        image_key=dataset_config.image_key,
+        target_img_size=dataset_config.target_img_size,
+        device=DEVICE,
+    )
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=True,
         drop_last=True,
     )
-    eval_env = create_env_from_df(
-        config.data_path,
-        config.dcs_backgrounds_path,
-        config.dcs_backgrounds_split,
-        frame_stack=config.frame_stack,
-    )
-    print(eval_env.observation_space)
-    print(eval_env.action_space)
 
+    img_size = dataset_config.target_img_size
     num_actions = lam.latent_act_dim
     for p in lam.parameters():
         p.requires_grad_(False)
     lam.eval()
 
     actor = Actor(
-        shape=(3 * config.frame_stack, dataset.img_hw, dataset.img_hw),
+        shape=(3 * config.frame_stack, img_size, img_size),
         num_actions=num_actions,
         encoder_scale=config.encoder_scale,
         encoder_channels=(16, 32, 64, 128, 256) if config.encoder_deep else (16, 32, 32),
@@ -420,9 +353,9 @@ def train_bc(lam: LAOMWithLabels, config: BCConfig):
     act_decoder_optim = torch.optim.AdamW(params=act_decoder.parameters(), lr=config.learning_rate, fused=True)
     act_decoder_scheduler = linear_annealing_with_warmup(act_decoder_optim, warmup_updates, total_updates)
 
-    torchinfo.summary(actor, input_size=(1, 3 * config.frame_stack, dataset.img_hw, dataset.img_hw))
+    torchinfo.summary(actor, input_size=(1, 3 * config.frame_stack, img_size, img_size))
     if config.use_aug:
-        augmenter = Augmenter(img_resolution=dataset.img_hw)
+        augmenter = Augmenter(img_resolution=img_size)
 
     start_time = time.time()
     total_tokens = 0
@@ -476,41 +409,30 @@ def train_bc(lam: LAOMWithLabels, config: BCConfig):
                 }
             )
 
-    actor.eval()
-    eval_returns = evaluate_bc(
-        eval_env,
-        actor,
-        num_episodes=config.eval_episodes,
-        seed=config.eval_seed,
-        device=DEVICE,
-        action_decoder=act_decoder,
-    )
-    wandb.log(
-        {
-            "bc/eval_returns_mean": eval_returns.mean(),
-            "bc/eval_returns_std": eval_returns.std(),
-            "bc/epoch": epoch,
-            "bc/total_steps": total_steps,
-        }
-    )
-
     return actor
 
 
-def train_act_decoder(actor: Actor, config: DecoderConfig, bc_config: BCConfig):
+def train_act_decoder(actor: Actor, config: DecoderConfig, bc_config: BCConfig, dataset_config: DatasetConfig):
     for p in actor.parameters():
         p.requires_grad_(False)
     actor.eval()
 
-    dataset = DCSInMemoryDataset(config.data_path, frame_stack=bc_config.frame_stack, device=DEVICE)
+    dataset = LeRobotBCDataset(
+        repo_id=dataset_config.repo_id,
+        frame_stack=bc_config.frame_stack,
+        image_key=dataset_config.image_key,
+        target_img_size=dataset_config.target_img_size,
+        device=DEVICE,
+    )
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=True,
     )
     # to make equal number of updates for all labeled datasets which vary in size
-    num_epochs = config.total_updates // len(dataloader)
+    num_epochs = max(1, config.total_updates // len(dataloader))
 
+    img_size = dataset_config.target_img_size
     action_decoder = ActionDecoder(
         obs_emb_dim=math.prod(actor.final_encoder_shape),
         latent_act_dim=actor.num_actions,
@@ -521,14 +443,6 @@ def train_act_decoder(actor: Actor, config: DecoderConfig, bc_config: BCConfig):
     optim = torch.optim.AdamW(
         params=get_optim_groups(action_decoder, config.weight_decay), lr=config.learning_rate, fused=True
     )
-    eval_env = create_env_from_df(
-        config.data_path,
-        config.dcs_backgrounds_path,
-        config.dcs_backgrounds_split,
-        frame_stack=bc_config.frame_stack,
-    )
-    print(eval_env.observation_space)
-    print(eval_env.action_space)
 
     # scheduler setup
     total_updates = len(dataloader) * num_epochs
@@ -536,7 +450,7 @@ def train_act_decoder(actor: Actor, config: DecoderConfig, bc_config: BCConfig):
     scheduler = linear_annealing_with_warmup(optim, warmup_updates, total_updates)
 
     if config.use_aug:
-        augmenter = Augmenter(img_resolution=dataset.img_hw)
+        augmenter = Augmenter(img_resolution=img_size)
 
     start_time = time.time()
     total_tokens = 0
@@ -577,24 +491,6 @@ def train_act_decoder(actor: Actor, config: DecoderConfig, bc_config: BCConfig):
                 }
             )
 
-    actor.eval()
-    eval_returns = evaluate_bc(
-        eval_env,
-        actor,
-        num_episodes=config.eval_episodes,
-        seed=config.eval_seed,
-        device=DEVICE,
-        action_decoder=action_decoder,
-    )
-    wandb.log(
-        {
-            "decoder/eval_returns_mean": eval_returns.mean(),
-            "decoder/eval_returns_std": eval_returns.std(),
-            "decoder/epoch": epoch,
-            "decoder/total_steps": total_steps,
-        }
-    )
-
     return action_decoder
 
 
@@ -608,12 +504,14 @@ def train(config: Config):
         save_code=True,
     )
     set_seed(config.seed)
-    # stage 1: pretraining lapo on unlabeled dataset
-    lapo = train_laom(config=config.lapo)
+    # stage 1: pretraining laom on unlabeled dataset
+    lapo = train_laom(config=config.lapo, dataset_config=config.dataset)
     # stage 2: pretraining bc on latent actions
-    actor = train_bc(lam=lapo, config=config.bc)
-    # stage 3: finetune on labeles ground-truth actions
-    action_decoder = train_act_decoder(actor=actor, config=config.decoder, bc_config=config.bc)
+    actor = train_bc(lam=lapo, config=config.bc, dataset_config=config.dataset)
+    # stage 3: finetune on labeled ground-truth actions
+    action_decoder = train_act_decoder(
+        actor=actor, config=config.decoder, bc_config=config.bc, dataset_config=config.dataset
+    )
 
     run.finish()
     return lapo, actor, action_decoder

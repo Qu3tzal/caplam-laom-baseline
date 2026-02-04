@@ -107,34 +107,14 @@ class LeRobotLAOMDataset(Dataset):
 
         self.valid_indices = list(self.valid_indices)
 
-    def _process_images(self, images: torch.Tensor) -> torch.Tensor:
+    def _stack_frames(self, images: torch.Tensor) -> torch.Tensor:
         """
-        Process images: resize and convert to expected format.
+        Stack frames along channel dimension.
 
         Input: [N, C, H, W] in [0, 1]
-        Output: [H, W, C*N] in [0, 255]
+        Output: [N*C, H, W] in [0, 1]
         """
-        # Resize if needed
-        if images.shape[-1] != self.target_img_size or images.shape[-2] != self.target_img_size:
-            images = F.interpolate(
-                images.float(),
-                size=(self.target_img_size, self.target_img_size),
-                mode="bilinear",
-                align_corners=False,
-            )
-
-        # Convert from [0, 1] to [0, 255]
-        images = images * 255.0
-
-        # Stack frames: [N, C, H, W] -> [H, W, N*C]
-        # First permute to [N, H, W, C]
-        images = images.permute(0, 2, 3, 1)
-        # Then reshape to [H, W, N*C]
-        images = images.permute(1, 2, 0, 3).reshape(
-            self.target_img_size, self.target_img_size, -1
-        )
-
-        return images
+        return images.reshape(-1, images.shape[-2], images.shape[-1])
 
     def __len__(self):
         return len(self.valid_indices)
@@ -165,10 +145,10 @@ class LeRobotLAOMDataset(Dataset):
         # For now, use the max_offset frame and the offset info
         future_obs_frames = images[-self.frame_stack:]  # Last frame_stack frames
 
-        # Process each observation
-        obs = self._process_images(obs_frames)
-        next_obs = self._process_images(next_obs_frames)
-        future_obs = self._process_images(future_obs_frames)
+        # Stack frames along channel dimension
+        obs = self._stack_frames(obs_frames)
+        next_obs = self._stack_frames(next_obs_frames)
+        future_obs = self._stack_frames(future_obs_frames)
 
         # Get action
         action = batch["action"]
@@ -263,23 +243,14 @@ class LeRobotBCDataset(Dataset):
                 for idx in range(valid_start, valid_end):
                     self.valid_indices.append(idx)
 
-    def _process_images(self, images: torch.Tensor) -> torch.Tensor:
-        """Process images: resize and convert to expected format."""
-        if images.shape[-1] != self.target_img_size or images.shape[-2] != self.target_img_size:
-            images = F.interpolate(
-                images.float(),
-                size=(self.target_img_size, self.target_img_size),
-                mode="bilinear",
-                align_corners=False,
-            )
+    def _stack_frames(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Stack frames along channel dimension.
 
-        images = images * 255.0
-        images = images.permute(0, 2, 3, 1)
-        images = images.permute(1, 2, 0, 3).reshape(
-            self.target_img_size, self.target_img_size, -1
-        )
-
-        return images
+        Input: [N, C, H, W] in [0, 1]
+        Output: [N*C, H, W] in [0, 1]
+        """
+        return images.reshape(-1, images.shape[-2], images.shape[-1])
 
     def __len__(self):
         return len(self.valid_indices)
@@ -293,8 +264,8 @@ class LeRobotBCDataset(Dataset):
         obs_frames = images[: self.frame_stack]
         next_obs_frames = images[1 : self.frame_stack + 1]
 
-        obs = self._process_images(obs_frames)
-        next_obs = self._process_images(next_obs_frames)
+        obs = self._stack_frames(obs_frames)
+        next_obs = self._stack_frames(next_obs_frames)
 
         action = batch["action"]
         if isinstance(action, list):

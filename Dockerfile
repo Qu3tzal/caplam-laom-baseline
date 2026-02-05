@@ -1,33 +1,20 @@
-# TODO: check that it is working.
-FROM cr.ai.cloud.ru/aicloud-base-images/cuda12.1-torch2-py311:0.0.36
-USER root
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
 
-RUN mkdir ./workspace
-WORKDIR ./workspace
+WORKDIR /app
+COPY ./src /app/src
+COPY ./configs /app/configs
+COPY ./train*.py /app
+COPY ./requirements.txt /app
 
-RUN apt-get update --fix-missing && apt-get upgrade -y
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# installing dependencies
-RUN pip uninstall --yes opencv
-RUN pip install --upgrade --force-reinstall opencv-python
+# Install package
+RUN pip install -r /app/requirements.txt
 
-RUN pip install \
-    torchvision \
-    torchinfo \
-    torcheval \
-    mujoco==3.2.0 \
-    gymnasium \
-    shimmy \
-    dm_control==1.0.2 \
-    imageio \
-    imageio-ffmpeg \
-    Pillow \
-    pyrallis \
-    h5py \
-    tqdm \
-    stable_baselines3 \
-    sb3-contrib \
-    vector-quantize-pytorch \
-    wandb==0.19.9
 
-USER user
+# Default entrypoint runs the stage1 script
+ENTRYPOINT ["/bin/bash", "run.sh"]

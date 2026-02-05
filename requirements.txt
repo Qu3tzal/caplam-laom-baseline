@@ -9,6 +9,6 @@ Pillow
 pyrallis==0.3.1
 tqdm
 vector-quantize-pytorch==1.22.16
-wandb==0.19.9
-lerobot==0.4.3
+wandb==0.20.0
+lerobot==0.4.2
 huggingface_hub

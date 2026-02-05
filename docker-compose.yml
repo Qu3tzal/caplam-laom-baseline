@@ -1,0 +1,20 @@
+services:
+  stage1:
+    build: .
+    environment:
+      - HF_HOME=/app/.cache/huggingface
+      - HF_TOKEN=${HF_TOKEN:-}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - NUM_GPUS=${NUM_GPUS:-}
+      - CONFIG=src/cavp/configs/stage1.yaml
+    volumes:
+      - .:/app
+      - ~/.cache/huggingface:/app/.cache/huggingface
+    shm_size: '8gb'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

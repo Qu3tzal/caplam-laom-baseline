@@ -135,7 +135,7 @@ def train_laom(config: LAOMConfig, dataset_config: DatasetConfig):
         dataset,
         batch_size=config.batch_size,
         shuffle=True,
-        num_workers=16,
+        num_workers=4,
         pin_memory=True,
     )
 
@@ -151,7 +151,7 @@ def train_laom(config: LAOMConfig, dataset_config: DatasetConfig):
     labeled_dataloader = DataLoader(
         labeled_dataset,
         batch_size=config.labeled_batch_size,
-        num_workers=16,
+        num_workers=4,
         pin_memory=True,
     )
 

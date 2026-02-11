@@ -154,6 +154,7 @@ class BCConfig:
     encoder_num_res_blocks: int = 2
     encoder_deep: bool = False
     dropout: float = 0.0
+    use_task_id: bool = True
     use_aug: bool = True
     frame_stack: int = 3
 
@@ -476,7 +477,7 @@ def train_bc(lam: LAOMWithLabels, config: BCConfig, dataset_config: DatasetConfi
 
             # update actor
             with torch.autocast(DEVICE, dtype=torch.bfloat16):
-                pred_actions, _ = actor(obs)
+                pred_actions, _ = actor(obs, task_id=obs["task_index"])
                 loss = F.mse_loss(pred_actions, target_actions)
 
             optim.zero_grad(set_to_none=True)
@@ -665,6 +666,7 @@ def train(config: Config):
             encoder_channels=(16, 32, 64, 128, 256) if config.bc.encoder_deep else (16, 32, 32),
             encoder_num_res_blocks=config.bc.encoder_num_res_blocks,
             dropout=config.bc.dropout,
+            use_task_id=config.bc.use_task_id
         ).to(DEVICE)
         load_checkpoint(actor, None, None, config.bc_checkpoint_path)
     else:

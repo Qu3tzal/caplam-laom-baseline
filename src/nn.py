@@ -158,6 +158,7 @@ class Actor(nn.Module):
         encoder_channels=(16, 32, 32),
         encoder_num_res_blocks=1,
         dropout=0.0,
+        use_task_id=True,
     ):
         super().__init__()
         conv_stack = []
@@ -180,7 +181,18 @@ class Actor(nn.Module):
         self.num_actions = num_actions
         self.apply(weight_init)
 
-    def forward(self, obs):
+        self.use_task_id = use_task_id
+        self.task_id_encoder = nn.Sequential(
+            nn.Linear(1, shape[0]),
+            nn.ReLU6(),
+            nn.Linear(shape[0], shape[0]),
+            nn.ReLU6(),
+        )
+
+    def forward(self, obs, task_id=None):
+        if self.use_task_id:
+            obs = obs + self.task_id_encoder(task_id)
+
         out = self.encoder(obs)
         out = out.flatten(2).mean(-1)
         act = self.actor_mean(out)

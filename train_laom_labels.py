@@ -1,3 +1,5 @@
+# Checkpoints loading/saving from https://github.com/joon-stack/laom/blob/main/train_laom_labels.py
+
 import os, yaml
 import math
 import time
@@ -173,6 +175,10 @@ class Config:
     group: str = "laom-labels"
     name: str = "laom-labels"
     seed: int = 0
+
+    # Checkpoints.
+    lapo_checkpoint_path: Optional[str] = "/app/checkpoints/laom/lapo_final.pt"
+    bc_checkpoint_path: Optional[str] = "/app/checkpoints/bc/bc_final.pt"
 
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     lapo: LAOMConfig = field(default_factory=LAOMConfig)
@@ -399,7 +405,7 @@ def train_laom(config: LAOMConfig, dataset_config: DatasetConfig, checkpoint_dir
     return lapo
 
 
-def train_bc(lam: LAOMWithLabels, config: BCConfig, dataset_config: DatasetConfig):
+def train_bc(lam: LAOMWithLabels, config: BCConfig, dataset_config: DatasetConfig, checkpoint_dir: str = "/app/checkpoints/bc/"):
     dataset = LeRobotBCDataset(
         repo_id=dataset_config.repo_id,
         frame_stack=config.frame_stack,
@@ -499,11 +505,21 @@ def train_bc(lam: LAOMWithLabels, config: BCConfig, dataset_config: DatasetConfi
                         "bc/total_steps": total_steps,
                     }
                 )
+        
+        save_checkpoint(
+            actor,
+            optim,
+            scheduler,
+            config.num_epochs - 1,
+            loss.item(),
+            os.path.join(checkpoint_dir, "bc_final.pt"),
+            config,
+        )
 
     return actor
 
 
-def train_act_decoder(actor: Actor, config: DecoderConfig, bc_config: BCConfig, dataset_config: DatasetConfig):
+def train_act_decoder(actor: Actor, config: DecoderConfig, bc_config: BCConfig, dataset_config: DatasetConfig, checkpoint_dir: str = "/app/checkpoints/act_decoder/"):
     for p in actor.parameters():
         p.requires_grad_(False)
     actor.eval()
@@ -581,6 +597,16 @@ def train_act_decoder(actor: Actor, config: DecoderConfig, bc_config: BCConfig, 
                         "decoder/total_steps": total_steps,
                     }
                 )
+        
+        save_checkpoint(
+            action_decoder,
+            optim,
+            scheduler,
+            num_epochs - 1,
+            loss.item(),
+            os.path.join(checkpoint_dir, "action_decoder_final.pt"),
+            config,
+        )
 
     return action_decoder
 
@@ -595,10 +621,56 @@ def train(config: Config):
         save_code=True,
     )
     set_seed(config.seed)
+
     # stage 1: pretraining laom on unlabeled dataset
-    lapo = train_laom(config=config.lapo, dataset_config=config.dataset)
+    if config.lapo_checkpoint_path:
+        print("=== Stage 1: LAPO Pretraining (skipped, loading from checkpoint) ===")
+        # To create model, we need dataset metadata
+        dataset = LeRobotLAOMDataset(
+            repo_id=dataset_config.repo_id,
+            frame_stack=config.frame_stack,
+            max_offset=config.future_obs_offset,
+            image_key=dataset_config.image_key,
+            target_img_size=dataset_config.target_img_size,
+            device="cpu",
+        )
+        lapo = LAOMWithLabels(
+            shape=(3 * config.lapo.frame_stack, dataset.img_hw, dataset.img_hw),
+            true_act_dim=dataset.act_dim,
+            latent_act_dim=config.lapo.latent_action_dim,
+            act_head_dim=config.lapo.act_head_dim,
+            act_head_dropout=config.lapo.act_head_dropout,
+            obs_head_dim=config.lapo.obs_head_dim,
+            obs_head_dropout=config.lapo.obs_head_dropout,
+            encoder_scale=config.lapo.encoder_scale,
+            encoder_channels=(16, 32, 64, 128, 256) if config.lapo.encoder_deep else (16, 32, 32),
+            encoder_num_res_blocks=config.lapo.encoder_num_res_blocks,
+            encoder_dropout=config.lapo.encoder_dropout,
+            encoder_norm_out=config.lapo.encoder_norm_out,
+        ).to(DEVICE)
+        load_checkpoint(lapo, None, None, config.lapo_checkpoint_path)
+    else:
+        print("=== Stage 1: LAPO Pretraining ===")
+        lapo = train_laom(config=config.lapo, dataset_config=config.dataset)
+    
     # stage 2: pretraining bc on latent actions
-    actor = train_bc(lam=lapo, config=config.bc, dataset_config=config.dataset)
+    if config.bc_checkpoint_path:
+        print("=== Stage 2: BC Pretraining (skipped, loading from checkpoint) ===")
+        # We need dataset metadata to create the actor model
+        dataset = LeRobotLAOMDataset(config.bc.data_path, frame_stack=config.bc.frame_stack, device="cpu")
+        actor = Actor(
+            shape=(3 * config.bc.frame_stack, dataset.img_hw, dataset.img_hw),
+            num_actions=config.lapo.latent_action_dim,
+            encoder_scale=config.bc.encoder_scale,
+            encoder_channels=(16, 32, 64, 128, 256) if config.bc.encoder_deep else (16, 32, 32),
+            encoder_num_res_blocks=config.bc.encoder_num_res_blocks,
+            dropout=config.bc.dropout,
+        ).to(DEVICE)
+        load_checkpoint(actor, None, None, config.bc_checkpoint_path)
+    else:
+        print("=== Stage 2: BC Pretraining ===")
+        actor = train_bc(lam=lapo, config=config.bc, checkpoint_dir=checkpoint_dir)
+
     # stage 3: finetune on labeled ground-truth actions
     action_decoder = train_act_decoder(
         actor=actor, config=config.decoder, bc_config=config.bc, dataset_config=config.dataset

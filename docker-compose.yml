@@ -10,7 +10,7 @@ services:
     volumes:
       - .:/app
       - ~/.cache/huggingface:/app/.cache/huggingface
-    shm_size: '8gb'
+    shm_size: '32gb'
     deploy:
       resources:
         reservations:

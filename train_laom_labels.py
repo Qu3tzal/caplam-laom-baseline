@@ -1,3 +1,4 @@
+import os, yaml
 import math
 import time
 import uuid
@@ -33,6 +34,66 @@ torch.backends.cudnn.allow_tf32 = True
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+# From: https://github.com/joon-stack/laom/blob/main/train_laom_labels.py
+def save_checkpoint(model, optimizer, scheduler, epoch, loss, filepath, config=None):
+    """Utility to save a model with training information."""
+    checkpoint_data = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+        'loss': loss,
+    }
+    
+    # Save the config into a YAML file
+    if config is not None:
+        config_filepath = filepath.replace('.pt', '_config.yaml')
+        with open(config_filepath, 'w') as f:
+            yaml.dump(asdict(config), f, default_flow_style=False, allow_unicode=True)
+        print(f"Config saved: {config_filepath}")
+    
+    torch.save(checkpoint_data, filepath)
+    print(f"Checkpoint saved: {filepath}")
+
+
+def load_checkpoint(model, optimizer, scheduler, filepath):
+    """Loads a model and the training information."""
+    if os.path.exists(filepath):
+        checkpoint = torch.load(filepath, map_location=DEVICE)
+        
+        # Debugging: print shapes before loading
+        if 'model_state_dict' in checkpoint and hasattr(model, 'true_actions_head'):
+            print("--- Shape Debug ---")
+            # Shape in the current model
+            current_shape = model.true_actions_head.weight.shape
+            print(f"Current model's 'true_actions_head' shape: {current_shape}")
+            
+            # Shape in the checkpoint
+            checkpoint_shape = checkpoint['model_state_dict']['true_actions_head.weight'].shape
+            print(f"Checkpoint's 'true_actions_head' shape: {checkpoint_shape}")
+            print("-------------------")
+
+        model.load_state_dict(checkpoint['model_state_dict'])
+        if optimizer and 'optimizer_state_dict' in checkpoint and checkpoint['optimizer_state_dict']:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if scheduler and 'scheduler_state_dict' in checkpoint and checkpoint['scheduler_state_dict']:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        print(f"Loaded checkpoint: {filepath} (epoch {checkpoint['epoch']})")
+        
+        # Load the config from the YAML file.
+        config_filepath = filepath.replace('.pt', '_config.yaml')
+        if os.path.exists(config_filepath):
+            with open(config_filepath, 'r') as f:
+                config = yaml.safe_load(f)
+            print(f"Config loaded: {config_filepath}")
+            print("Keys loaded from the config:")
+            for key, value in config.items():
+                print(f"  {key}: {value}")
+            return checkpoint['epoch'], checkpoint['loss'], config
+        
+        return checkpoint['epoch'], checkpoint['loss'], None
+    return 0, float('inf'), None
+
 
 def prepare_obs(img: torch.Tensor, target_size: int) -> torch.Tensor:
     """Resize and normalize images on GPU.
@@ -54,7 +115,7 @@ class DatasetConfig:
 
 @dataclass
 class LAOMConfig:
-    num_epochs: int = 100
+    num_epochs: int = 10
     batch_size: int = 512
     labeled_batch_size: int = 512
     labeled_loss_coef: float = 0.05
@@ -122,7 +183,7 @@ class Config:
         self.name = f"{self.name}-{str(uuid.uuid4())}"
 
 
-def train_laom(config: LAOMConfig, dataset_config: DatasetConfig):
+def train_laom(config: LAOMConfig, dataset_config: DatasetConfig, checkpoint_dir: str = "/app/checkpoints/laom/"):
     dataset = LeRobotLAOMDataset(
         repo_id=dataset_config.repo_id,
         frame_stack=config.frame_stack,
@@ -322,6 +383,18 @@ def train_laom(config: LAOMConfig, dataset_config: DatasetConfig):
                         "lapo/total_steps": total_iterations,
                     }
                 )
+
+        # Save LAOM every epoch.
+        save_checkpoint(
+            lapo,
+            optim,
+            scheduler,
+            config.num_epochs - 1,
+            loss.item(),
+            os.path.join(checkpoint_dir, "lapo_final.pt"),
+            config,
+        )
+
 
     return lapo
 

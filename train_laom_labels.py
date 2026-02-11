@@ -460,7 +460,7 @@ def train_bc(lam: LAOMWithLabels, config: BCConfig, dataset_config: DatasetConfi
     total_steps = 0
     for epoch in trange(config.num_epochs, desc="Epochs"):
         actor.train()
-        for batch in dataloader:
+        for batch in tqdm.tqdm(dataloader):
             total_tokens += config.batch_size
             total_steps += 1
 
@@ -565,7 +565,7 @@ def train_act_decoder(actor: Actor, config: DecoderConfig, bc_config: BCConfig, 
     total_steps = 0
 
     for epoch in trange(num_epochs, desc="Epochs"):
-        for batch in dataloader:
+        for batch in tqdm.tqdm(dataloader):
             total_tokens += config.batch_size
             total_steps += 1
 
